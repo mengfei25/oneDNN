@@ -91,27 +91,44 @@ jobs:
           script: |
             const comp = 'onednn';
             const pattern = process.env.PATTERN;
+            const { owner, repo } = context.repo;
             const pr = (await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.issue.number,
+              owner, repo, pull_number: context.payload.issue.number,
             })).data;
             const shortSha = (s) => s.slice(0, 7);
             const target = process.env.TARGET_OVERRIDE || shortSha(pr.head.sha);
             const baseline = process.env.BASELINE_OVERRIDE || shortSha(pr.base.sha);
-            const name = `${process.env.CHECK_PREFIX} / ${comp} (${pattern})`;
-            const check = (await github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name,
-              head_sha: pr.head.sha,
-              status: 'in_progress',
-              started_at: new Date().toISOString(),
-              output: {
-                title: 'Dispatching acceptance comparison',
-                summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run…`,
-              },
-            })).data;
+            // Fixed name -> single check row; reuse it so only the latest is kept.
+            const name = `${process.env.CHECK_PREFIX} / ${comp}`;
+            const output = {
+              title: `Dispatching acceptance comparison (${pattern})`,
+              summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run…`,
+            };
+            const existing = (await github.rest.checks.listForRef({
+              owner, repo, ref: pr.head.sha, check_name: name, per_page: 1,
+            })).data.check_runs[0];
+            const check = existing
+              ? (await github.rest.checks.update({
+                  owner, repo, check_run_id: existing.id,
+                  status: 'in_progress', started_at: new Date().toISOString(), output,
+                })).data
+              : (await github.rest.checks.create({
+                  owner, repo, name, head_sha: pr.head.sha,
+                  status: 'in_progress', started_at: new Date().toISOString(), output,
+                })).data;
+            // Demote older pattern-named acceptance checks on this commit.
+            const all = (await github.rest.checks.listForRef({
+              owner, repo, ref: pr.head.sha, per_page: 100,
+            })).data.check_runs;
+            for (const c of all) {
+              if (c.id !== check.id && c.name.startsWith(`${process.env.CHECK_PREFIX} / ${comp} (`)) {
+                await github.rest.checks.update({
+                  owner, repo, check_run_id: c.id,
+                  status: 'completed', conclusion: 'neutral',
+                  output: { title: 'Superseded', summary: 'Superseded by the latest acceptance run.' },
+                });
+              }
+            }
             core.setOutput('check_id', check.id);
             core.setOutput('check_name', name);
             core.setOutput('head_sha', shortSha(pr.head.sha));
@@ -138,6 +155,7 @@ jobs:
           gh workflow run "${XPU_OPS_WORKFLOW}" \
             --repo "${XPU_OPS_REPO}" \
             --ref "${XPU_OPS_REF}" \
+            -f caller="onednn-pr-${PR_NUMBER}" \
             -f test_pattern="${PATTERN}" \
             -f python="${PYVER}" \
             -f pytorch="${PYTORCH}" \
@@ -180,6 +198,7 @@ jobs:
         env:
           RUN_URL: ${{ steps.find.outputs.run_url }}
           COMPONENT: ${{ steps.check.outputs.component }}
+          PATTERN: ${{ steps.check.outputs.pattern }}
           TARGET: ${{ steps.check.outputs.target_version }}
           BASELINE: ${{ steps.check.outputs.baseline_version }}
         with:
@@ -194,6 +213,7 @@ jobs:
                 title: 'Acceptance comparison running',
                 summary: [
                   `**Component:** \`${process.env.COMPONENT}\``,
+                  `**Pattern:** \`${process.env.PATTERN}\``,
                   `**Target:** \`${process.env.TARGET}\``,
                   `**Baseline:** \`${process.env.BASELINE}\``,
                   '',
@@ -227,6 +247,7 @@ jobs:
           RAW: ${{ steps.wait.outputs.conclusion }}
           RUN_URL: ${{ steps.find.outputs.run_url }}
           COMPONENT: ${{ steps.check.outputs.component }}
+          PATTERN: ${{ steps.check.outputs.pattern }}
           TARGET: ${{ steps.check.outputs.target_version }}
           BASELINE: ${{ steps.check.outputs.baseline_version }}
         with:
@@ -254,10 +275,11 @@ jobs:
               completed_at: new Date().toISOString(),
               details_url: runUrl,
               output: {
-                title: `Acceptance comparison: ${label}`,
+                title: `Acceptance comparison (${process.env.PATTERN}): ${label}`,
                 summary: [
                   `**Result:** \`${conclusion}\``,
                   `**Component:** \`${process.env.COMPONENT}\``,
+                  `**Pattern:** \`${process.env.PATTERN}\``,
                   `**Target:** \`${process.env.TARGET}\``,
                   `**Baseline:** \`${process.env.BASELINE}\``,
                   '',
