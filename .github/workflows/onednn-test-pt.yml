@@ -98,30 +98,23 @@ jobs:
             const shortSha = (s) => s.slice(0, 7);
             const target = process.env.TARGET_OVERRIDE || shortSha(pr.head.sha);
             const baseline = process.env.BASELINE_OVERRIDE || shortSha(pr.base.sha);
-            // Fixed name -> single check row; reuse it so only the latest is kept.
+            // Fixed name -> single check row. Always create a fresh in-progress
+            // run (updating a completed run keeps its old conclusion), then demote
+            // any older acceptance checks so only the latest stays active.
             const name = `${process.env.CHECK_PREFIX} / ${comp}`;
-            const output = {
-              title: `Dispatching acceptance comparison (${pattern})`,
-              summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run…`,
-            };
-            const existing = (await github.rest.checks.listForRef({
-              owner, repo, ref: pr.head.sha, check_name: name, per_page: 1,
-            })).data.check_runs[0];
-            const check = existing
-              ? (await github.rest.checks.update({
-                  owner, repo, check_run_id: existing.id,
-                  status: 'in_progress', started_at: new Date().toISOString(), output,
-                })).data
-              : (await github.rest.checks.create({
-                  owner, repo, name, head_sha: pr.head.sha,
-                  status: 'in_progress', started_at: new Date().toISOString(), output,
-                })).data;
-            // Demote older pattern-named acceptance checks on this commit.
+            const check = (await github.rest.checks.create({
+              owner, repo, name, head_sha: pr.head.sha,
+              status: 'in_progress', started_at: new Date().toISOString(),
+              output: {
+                title: `Dispatching acceptance comparison (${pattern})`,
+                summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run…`,
+              },
+            })).data;
             const all = (await github.rest.checks.listForRef({
               owner, repo, ref: pr.head.sha, per_page: 100,
             })).data.check_runs;
             for (const c of all) {
-              if (c.id !== check.id && c.name.startsWith(`${process.env.CHECK_PREFIX} / ${comp} (`)) {
+              if (c.id !== check.id && c.name.startsWith(`${process.env.CHECK_PREFIX} / ${comp}`)) {
                 await github.rest.checks.update({
                   owner, repo, check_run_id: c.id,
                   status: 'completed', conclusion: 'neutral',
