@@ -162,15 +162,17 @@ jobs:
         if: steps.cmd.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
+          PATTERN: ${{ steps.check.outputs.pattern }}
+          TARGET: ${{ steps.check.outputs.target_version }}
         run: |
-          head_sha="${{ steps.check.outputs.head_sha }}"
           run_id=""
           for _ in $(seq 1 30); do
             run_id=$(gh api \
               "repos/${XPU_OPS_REPO}/actions/workflows/${XPU_OPS_WORKFLOW}/runs?event=workflow_dispatch&per_page=30" \
               --jq "[.workflow_runs[]
                      | select(.created_at >= \"${{ steps.dispatch.outputs.dispatch_ts }}\")
-                     | select(.display_title | contains(\"${head_sha}\"))
+                     | select(.display_title | contains(\"[${PATTERN}]\"))
+                     | select(.display_title | contains(\"${TARGET}\"))
                      | .id][0] // empty")
             if [ -n "$run_id" ]; then break; fi
             sleep 10
