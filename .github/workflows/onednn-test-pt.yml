@@ -1,14 +1,18 @@
 name: oneDNN test_pt
 
-# Comment `test_pt` on a PR to run the torch-xpu-ops acceptance comparison
-# (`acceptance_ondemand.yml`) with target = PR head and baseline = PR base.
+# Comment a `test_pt` command on a PR to run the torch-xpu-ops acceptance
+# comparison (`acceptance_ondemand.yml`) and track the result as a live-updating
+# **check run** on the PR head commit (shows in the PR "Checks" tab; can be a
+# required merge gate).
 #
-# Instead of a legacy commit status, this creates a live-updating **check run**
-# on the PR head commit. It appears in the PR "Checks" tab exactly like a native
-# CI job and can be marked *required* in branch protection to act as a merge gate.
-#
-# NOTE: issue_comment workflows only run from the repository default branch, so
-# this file must be on `main` before commenting `test_pt` takes effect.
+# Command syntax (comment on the PR):
+#   test_pt[_ut|_e2e] [key=value ...]
+#     scope     : test_pt (UT+E2E) | test_pt_ut (UT only) | test_pt_e2e (E2E only)
+#     overrides : python= pytorch= torch_xpu_ops= target= baseline=
+#   default to the PR head/base. Examples:
+#     test_pt
+#     test_pt_ut python=3.12
+#     test_pt_e2e target=<sha> baseline=<sha>
 
 on:
   issue_comment:
@@ -21,13 +25,13 @@ permissions:
 
 concurrency:
   group: onednn-test-pt-${{ github.event.issue.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   XPU_OPS_REPO: mengfei25/torch-xpu-ops
   XPU_OPS_WORKFLOW: acceptance_ondemand.yml
   XPU_OPS_REF: main
-  CHECK_NAME: acceptance / onednn (test_pt)
+  CHECK_PREFIX: acceptance
 
 jobs:
   onednn_test_pt:
@@ -35,7 +39,8 @@ jobs:
     if: >-
       github.repository_owner == 'mengfei25' &&
       github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, 'test_pt')
+      (startsWith(github.event.comment.body, 'test_pt') ||
+       startsWith(github.event.comment.body, '/test_pt'))
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -47,51 +52,103 @@ jobs:
             "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content=rocket || true
 
-      - name: Create check run
-        id: check
+      - name: Parse command
+        id: cmd
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         uses: actions/github-script@v7
         with:
           script: |
+            const body = (process.env.COMMENT_BODY || '').trim();
+            // Syntax: test_pt[_ut|_e2e] [key=value ...]
+            const m = body.match(/^\/?(test_pt(?:_ut|_e2e)?)\b([\s\S]*)$/i);
+            if (!m) { core.setOutput('run', 'false'); return; }
+            const pattern = m[1].toLowerCase(); // test_pt | test_pt_ut | test_pt_e2e
+            const opts = {
+              python: '3.10',
+              pytorch: 'main',
+              torch_xpu_ops: 'main',
+              target: '',
+              baseline: '',
+            };
+            for (const tok of m[2].trim().split(/\s+/).filter(Boolean)) {
+              const kv = tok.match(/^([a-zA-Z_]+)=(.+)$/);
+              if (kv && kv[1].toLowerCase() in opts) opts[kv[1].toLowerCase()] = kv[2];
+            }
+            core.setOutput('run', 'true');
+            core.setOutput('pattern', pattern);
+            for (const [k, v] of Object.entries(opts)) core.setOutput(k, v);
+
+      - name: Create check run
+        id: check
+        if: steps.cmd.outputs.run == 'true'
+        env:
+          PATTERN: ${{ steps.cmd.outputs.pattern }}
+          TARGET_OVERRIDE: ${{ steps.cmd.outputs.target }}
+          BASELINE_OVERRIDE: ${{ steps.cmd.outputs.baseline }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comp = 'onednn';
+            const pattern = process.env.PATTERN;
             const pr = (await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.payload.issue.number,
             })).data;
+            const shortSha = (s) => s.slice(0, 7);
+            const target = process.env.TARGET_OVERRIDE || shortSha(pr.head.sha);
+            const baseline = process.env.BASELINE_OVERRIDE || shortSha(pr.base.sha);
+            const name = `${process.env.CHECK_PREFIX} / ${comp} (${pattern})`;
             const check = (await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              name: process.env.CHECK_NAME,
+              name,
               head_sha: pr.head.sha,
               status: 'in_progress',
               started_at: new Date().toISOString(),
               output: {
                 title: 'Dispatching acceptance comparison',
-                summary: 'Preparing target vs baseline acceptance run…',
+                summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run…`,
               },
             })).data;
             core.setOutput('check_id', check.id);
-            core.setOutput('head_sha', pr.head.sha);
-            core.setOutput('base_sha', pr.base.sha);
-            core.setOutput('target_version', `${pr.head.repo.full_name}@${pr.head.sha}`);
-            core.setOutput('baseline_version', `${pr.base.repo.full_name}@${pr.base.sha}`);
+            core.setOutput('check_name', name);
+            core.setOutput('head_sha', shortSha(pr.head.sha));
+            core.setOutput('component', comp);
+            core.setOutput('pattern', pattern);
+            core.setOutput('target_version', target);
+            core.setOutput('baseline_version', baseline);
 
       - name: Dispatch acceptance workflow
         id: dispatch
+        if: steps.cmd.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
+          COMPONENT: ${{ steps.check.outputs.component }}
+          PATTERN: ${{ steps.check.outputs.pattern }}
+          PYVER: ${{ steps.cmd.outputs.python }}
+          PYTORCH: ${{ steps.cmd.outputs.pytorch }}
+          TXO: ${{ steps.cmd.outputs.torch_xpu_ops }}
+          TARGET: ${{ steps.check.outputs.target_version }}
+          BASELINE: ${{ steps.check.outputs.baseline_version }}
         run: |
           dispatch_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           echo "dispatch_ts=$dispatch_ts" >> "$GITHUB_OUTPUT"
           gh workflow run "${XPU_OPS_WORKFLOW}" \
             --repo "${XPU_OPS_REPO}" \
             --ref "${XPU_OPS_REF}" \
-            -f python=3.10 \
-            -f test_component=onednn \
-            -f target_version="${{ steps.check.outputs.target_version }}" \
-            -f baseline_version="${{ steps.check.outputs.baseline_version }}"
+            -f test_pattern="${PATTERN}" \
+            -f python="${PYVER}" \
+            -f pytorch="${PYTORCH}" \
+            -f torch_xpu_ops="${TXO}" \
+            -f test_component="${COMPONENT}" \
+            -f target_version="${TARGET}" \
+            -f baseline_version="${BASELINE}"
 
       - name: Find dispatched run
         id: find
+        if: steps.cmd.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
         run: |
@@ -118,7 +175,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Link run in check
+        if: steps.cmd.outputs.run == 'true'
         uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ steps.find.outputs.run_url }}
+          COMPONENT: ${{ steps.check.outputs.component }}
+          TARGET: ${{ steps.check.outputs.target_version }}
+          BASELINE: ${{ steps.check.outputs.baseline_version }}
         with:
           script: |
             await github.rest.checks.update({
@@ -126,21 +189,22 @@ jobs:
               repo: context.repo.repo,
               check_run_id: Number('${{ steps.check.outputs.check_id }}'),
               status: 'in_progress',
-              details_url: '${{ steps.find.outputs.run_url }}',
+              details_url: process.env.RUN_URL,
               output: {
                 title: 'Acceptance comparison running',
                 summary: [
-                  `**Component:** \`onednn\``,
-                  `**Target:** \`${{ steps.check.outputs.target_version }}\``,
-                  `**Baseline:** \`${{ steps.check.outputs.baseline_version }}\``,
+                  `**Component:** \`${process.env.COMPONENT}\``,
+                  `**Target:** \`${process.env.TARGET}\``,
+                  `**Baseline:** \`${process.env.BASELINE}\``,
                   '',
-                  `[View run](${{ steps.find.outputs.run_url }})`,
+                  `[View run](${process.env.RUN_URL})`,
                 ].join('\n'),
               },
             });
 
       - name: Wait for acceptance run
         id: wait
+        if: steps.cmd.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
         run: |
@@ -157,8 +221,14 @@ jobs:
           echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
 
       - name: Finalize check run
-        if: always()
+        if: always() && steps.check.outputs.check_id != ''
         uses: actions/github-script@v7
+        env:
+          RAW: ${{ steps.wait.outputs.conclusion }}
+          RUN_URL: ${{ steps.find.outputs.run_url }}
+          COMPONENT: ${{ steps.check.outputs.component }}
+          TARGET: ${{ steps.check.outputs.target_version }}
+          BASELINE: ${{ steps.check.outputs.baseline_version }}
         with:
           script: |
             const map = {
@@ -170,9 +240,9 @@ jobs:
               neutral: 'neutral',
               skipped: 'skipped',
             };
-            const raw = '${{ steps.wait.outputs.conclusion }}';
+            const raw = process.env.RAW || '';
             const conclusion = map[raw] || 'failure';
-            const runUrl = '${{ steps.find.outputs.run_url }}' ||
+            const runUrl = process.env.RUN_URL ||
               `https://github.com/${process.env.XPU_OPS_REPO}/actions/workflows/${process.env.XPU_OPS_WORKFLOW}`;
             const label = raw || 'no result (timed out or dispatch failed)';
             await github.rest.checks.update({
@@ -187,9 +257,9 @@ jobs:
                 title: `Acceptance comparison: ${label}`,
                 summary: [
                   `**Result:** \`${conclusion}\``,
-                  `**Component:** \`onednn\``,
-                  `**Target:** \`${{ steps.check.outputs.target_version }}\``,
-                  `**Baseline:** \`${{ steps.check.outputs.baseline_version }}\``,
+                  `**Component:** \`${process.env.COMPONENT}\``,
+                  `**Target:** \`${process.env.TARGET}\``,
+                  `**Baseline:** \`${process.env.BASELINE}\``,
                   '',
                   `[View run](${runUrl})`,
                 ].join('\n'),
