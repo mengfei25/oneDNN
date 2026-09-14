@@ -1,0 +1,197 @@
+name: oneDNN test_pt
+
+# Comment `test_pt` on a PR to run the torch-xpu-ops acceptance comparison
+# (`acceptance_ondemand.yml`) with target = PR head and baseline = PR base.
+#
+# Instead of a legacy commit status, this creates a live-updating **check run**
+# on the PR head commit. It appears in the PR "Checks" tab exactly like a native
+# CI job and can be marked *required* in branch protection to act as a merge gate.
+#
+# NOTE: issue_comment workflows only run from the repository default branch, so
+# this file must be on `main` before commenting `test_pt` takes effect.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: onednn-test-pt-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+env:
+  XPU_OPS_REPO: mengfei25/torch-xpu-ops
+  XPU_OPS_WORKFLOW: acceptance_ondemand.yml
+  XPU_OPS_REF: main
+  CHECK_NAME: acceptance / onednn (test_pt)
+
+jobs:
+  onednn_test_pt:
+    name: onednn_test_pt
+    if: >-
+      github.repository_owner == 'mengfei25' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, 'test_pt')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Acknowledge command
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=rocket || true
+
+      - name: Create check run
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = (await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            })).data;
+            const check = (await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: process.env.CHECK_NAME,
+              head_sha: pr.head.sha,
+              status: 'in_progress',
+              started_at: new Date().toISOString(),
+              output: {
+                title: 'Dispatching acceptance comparison',
+                summary: 'Preparing target vs baseline acceptance run…',
+              },
+            })).data;
+            core.setOutput('check_id', check.id);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('target_version', `${pr.head.repo.full_name}@${pr.head.sha}`);
+            core.setOutput('baseline_version', `${pr.base.repo.full_name}@${pr.base.sha}`);
+
+      - name: Dispatch acceptance workflow
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
+        run: |
+          dispatch_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "dispatch_ts=$dispatch_ts" >> "$GITHUB_OUTPUT"
+          gh workflow run "${XPU_OPS_WORKFLOW}" \
+            --repo "${XPU_OPS_REPO}" \
+            --ref "${XPU_OPS_REF}" \
+            -f python=3.10 \
+            -f test_component=onednn \
+            -f target_version="${{ steps.check.outputs.target_version }}" \
+            -f baseline_version="${{ steps.check.outputs.baseline_version }}"
+
+      - name: Find dispatched run
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
+        run: |
+          head_sha="${{ steps.check.outputs.head_sha }}"
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id=$(gh api \
+              "repos/${XPU_OPS_REPO}/actions/workflows/${XPU_OPS_WORKFLOW}/runs?event=workflow_dispatch&per_page=30" \
+              --jq "[.workflow_runs[]
+                     | select(.created_at >= \"${{ steps.dispatch.outputs.dispatch_ts }}\")
+                     | select(.display_title | contains(\"${head_sha}\"))
+                     | .id][0] // empty")
+            if [ -n "$run_id" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not locate the dispatched acceptance run."
+            exit 1
+          fi
+          run_url=$(gh api "repos/${XPU_OPS_REPO}/actions/runs/${run_id}" --jq '.html_url')
+          {
+            echo "run_id=$run_id"
+            echo "run_url=$run_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Link run in check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number('${{ steps.check.outputs.check_id }}'),
+              status: 'in_progress',
+              details_url: '${{ steps.find.outputs.run_url }}',
+              output: {
+                title: 'Acceptance comparison running',
+                summary: [
+                  `**Component:** \`onednn\``,
+                  `**Target:** \`${{ steps.check.outputs.target_version }}\``,
+                  `**Baseline:** \`${{ steps.check.outputs.baseline_version }}\``,
+                  '',
+                  `[View run](${{ steps.find.outputs.run_url }})`,
+                ].join('\n'),
+              },
+            });
+
+      - name: Wait for acceptance run
+        id: wait
+        env:
+          GH_TOKEN: ${{ secrets.ONEDNN_DISPATCH_TOKEN }}
+        run: |
+          run_id="${{ steps.find.outputs.run_id }}"
+          conclusion=""
+          # Poll for up to ~5h50m (below the 6h job limit); 30s interval.
+          for _ in $(seq 1 700); do
+            data=$(gh api "repos/${XPU_OPS_REPO}/actions/runs/${run_id}")
+            run_status=$(echo "$data" | jq -r '.status')
+            conclusion=$(echo "$data" | jq -r '.conclusion')
+            if [ "$run_status" = "completed" ]; then break; fi
+            sleep 30
+          done
+          echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+
+      - name: Finalize check run
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const map = {
+              success: 'success',
+              failure: 'failure',
+              cancelled: 'cancelled',
+              timed_out: 'timed_out',
+              action_required: 'action_required',
+              neutral: 'neutral',
+              skipped: 'skipped',
+            };
+            const raw = '${{ steps.wait.outputs.conclusion }}';
+            const conclusion = map[raw] || 'failure';
+            const runUrl = '${{ steps.find.outputs.run_url }}' ||
+              `https://github.com/${process.env.XPU_OPS_REPO}/actions/workflows/${process.env.XPU_OPS_WORKFLOW}`;
+            const label = raw || 'no result (timed out or dispatch failed)';
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number('${{ steps.check.outputs.check_id }}'),
+              status: 'completed',
+              conclusion,
+              completed_at: new Date().toISOString(),
+              details_url: runUrl,
+              output: {
+                title: `Acceptance comparison: ${label}`,
+                summary: [
+                  `**Result:** \`${conclusion}\``,
+                  `**Component:** \`onednn\``,
+                  `**Target:** \`${{ steps.check.outputs.target_version }}\``,
+                  `**Baseline:** \`${{ steps.check.outputs.baseline_version }}\``,
+                  '',
+                  `[View run](${runUrl})`,
+                ].join('\n'),
+              },
+            });
