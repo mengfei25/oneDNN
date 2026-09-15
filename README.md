@@ -18,6 +18,7 @@ AMD\* GPU, OpenPOWER\* Power ISA (PPC64), IBMz\* (s390x), and RISC-V.
 oneDNN is intended for deep learning applications and framework
 developers interested in improving application performance on CPUs and GPUs.
 
+
 Deep learning practitioners should use one of the applications enabled with oneDNN:
 
 * [Apache SINGA](https://singa.apache.org)
