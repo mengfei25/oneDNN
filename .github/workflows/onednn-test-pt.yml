@@ -2,7 +2,7 @@ name: oneDNN test_pt
 
 # Comment a `make test_pt` command on a PR to run the torch-xpu-ops acceptance
 # comparison (`acceptance_ondemand.yml`). Two commit statuses show on the PR:
-#   1. `oneDNN: dispatch acceptance run`        - this repo dispatched the run
+#   1. `torch-xpu-ops: dispatch acceptance run` - this repo dispatched the run
 #   2. `torch-xpu-ops: onednn acceptance tests` - the run in the other repo
 # Status #2 is finalized cross-repo by the acceptance run posting a commit
 # status back (target_url links straight to that run). Event-driven, no polling.
@@ -34,7 +34,7 @@ env:
   XPU_OPS_REPO: mengfei25/torch-xpu-ops
   XPU_OPS_WORKFLOW: acceptance_ondemand.yml
   XPU_OPS_REF: main
-  DISPATCH_CONTEXT: 'oneDNN: dispatch acceptance run'
+  DISPATCH_CONTEXT: 'torch-xpu-ops: dispatch acceptance run'
   ACCEPT_CONTEXT: 'torch-xpu-ops: onednn acceptance tests'
 
 jobs:
