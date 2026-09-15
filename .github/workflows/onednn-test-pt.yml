@@ -110,11 +110,13 @@ jobs:
           TXO: ${{ steps.cmd.outputs.torch_xpu_ops }}
           TARGET: ${{ steps.cmd.outputs.target_version }}
           BASELINE: ${{ steps.cmd.outputs.baseline_version }}
+          SHA: ${{ steps.cmd.outputs.head_sha }}
         run: |
           echo "since=$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           gh workflow run "${XPU_OPS_WORKFLOW}" \
             --repo "${XPU_OPS_REPO}" --ref "${XPU_OPS_REF}" \
             -f caller="onednn-pr-${PR_NUMBER}" \
+            -f caller_ref="${{ github.repository }}#${PR_NUMBER}@${SHA}" \
             -f test_pattern="${PATTERN}" \
             -f python="${PYVER}" \
             -f pytorch="${PYTORCH}" \
