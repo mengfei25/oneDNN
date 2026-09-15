@@ -1,6 +1,6 @@
 name: oneDNN test_pt
 
-# Comment a `test_pt` command on a PR to run the torch-xpu-ops acceptance
+# Comment a `make test_pt` command on a PR to run the torch-xpu-ops acceptance
 # comparison (`acceptance_ondemand.yml`). This creates a **check run** on the PR
 # head commit (shows in the PR "Checks" tab; can be a required merge gate) and
 # dispatches the run, then exits. The acceptance run reports its result back via
@@ -8,14 +8,14 @@ name: oneDNN test_pt
 # Event-driven, no polling.
 #
 # Command syntax (comment on the PR):
-#   test_pt[_ut|_e2e|_smoke] [key=value ...]
+#   make test_pt[_ut|_e2e|_smoke] [key=value ...]
 #     scope     : test_pt (UT+E2E) | test_pt_ut (UT only) | test_pt_e2e (E2E only) | test_pt_smoke (smoke only)
 #     overrides : python= pytorch= torch_xpu_ops= target= baseline=
 #   default to the PR head/base. Examples:
-#     test_pt
-#     test_pt_ut python=3.12
-#     test_pt_e2e target=<sha> baseline=<sha>
-#     test_pt_smoke
+#     make test_pt
+#     make test_pt_ut python=3.12
+#     make test_pt_e2e target=<sha> baseline=<sha>
+#     make test_pt_smoke
 
 on:
   issue_comment:
@@ -45,8 +45,7 @@ jobs:
       (github.event.comment.author_association == 'OWNER' ||
        github.event.comment.author_association == 'MEMBER' ||
        github.event.comment.author_association == 'COLLABORATOR') &&
-      (startsWith(github.event.comment.body, 'test_pt') ||
-       startsWith(github.event.comment.body, '/test_pt'))
+      startsWith(github.event.comment.body, 'make test_pt')
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -66,8 +65,8 @@ jobs:
         with:
           script: |
             const body = (process.env.COMMENT_BODY || '').trim();
-            // Syntax: test_pt[_ut|_e2e|_smoke] [key=value ...]
-            const m = body.match(/^\/?(test_pt(?:_ut|_e2e|_smoke)?)\b([\s\S]*)$/i);
+            // Syntax: make test_pt[_ut|_e2e|_smoke] [key=value ...]
+            const m = body.match(/^make\s+(test_pt(?:_ut|_e2e|_smoke)?)\b([\s\S]*)$/i);
             if (!m) { core.setOutput('run', 'false'); return; }
             const pattern = m[1].toLowerCase(); // test_pt | test_pt_ut | test_pt_e2e | test_pt_smoke
             const opts = {
