@@ -111,7 +111,7 @@ jobs:
             // its old conclusion), then demote older acceptance checks so only the
             // latest stays active. `prefix` keeps the demote match stable.
             const prefix = `${process.env.CHECK_PREFIX} / ${comp}`;
-            const name = `${prefix} (${xpuName})`;
+            const name = `${prefix} @ ${xpuName}`;
             const check = (await github.rest.checks.create({
               owner, repo, name, head_sha: pr.head.sha,
               status: 'in_progress', started_at: new Date().toISOString(),
