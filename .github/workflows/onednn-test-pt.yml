@@ -1,11 +1,11 @@
 name: oneDNN test_pt
 
 # Comment a `make test_pt` command on a PR to run the torch-xpu-ops acceptance
-# comparison (`acceptance_ondemand.yml`). This creates a **check run** on the PR
-# head commit (shows in the PR "Checks" tab; can be a required merge gate) and
-# dispatches the run, then exits. The acceptance run reports its result back via
-# repository_dispatch, and `onednn-test-pt-result.yml` finalizes the check.
-# Event-driven, no polling.
+# comparison (`acceptance_ondemand.yml`). Two commit statuses show on the PR:
+#   1. `dispatch / onednn @ oneDNN`          - this repo dispatched the run
+#   2. `acceptance / onednn @ torch-xpu-ops` - the run in the other repo
+# Status #2 is finalized cross-repo by the acceptance run posting a commit
+# status back (target_url links straight to that run). Event-driven, no polling.
 #
 # Command syntax (comment on the PR):
 #   make test_pt[_ut|_e2e|_smoke] [key=value ...]
@@ -23,7 +23,7 @@ on:
 
 permissions:
   contents: read
-  checks: write
+  statuses: write
   pull-requests: write
 
 concurrency:
@@ -34,7 +34,8 @@ env:
   XPU_OPS_REPO: mengfei25/torch-xpu-ops
   XPU_OPS_WORKFLOW: acceptance_ondemand.yml
   XPU_OPS_REF: main
-  CHECK_PREFIX: acceptance
+  DISPATCH_CONTEXT: dispatch / onednn @ oneDNN
+  ACCEPT_CONTEXT: acceptance / onednn @ torch-xpu-ops
 
 jobs:
   onednn_test_pt:
@@ -84,13 +85,14 @@ jobs:
             core.setOutput('pattern', pattern);
             for (const [k, v] of Object.entries(opts)) core.setOutput(k, v);
 
-      - name: Create check run
+      - name: Set pending statuses
         id: check
         if: steps.cmd.outputs.run == 'true'
         env:
           PATTERN: ${{ steps.cmd.outputs.pattern }}
           TARGET_OVERRIDE: ${{ steps.cmd.outputs.target }}
           BASELINE_OVERRIDE: ${{ steps.cmd.outputs.baseline }}
+          DISPATCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -100,42 +102,25 @@ jobs:
             const pr = (await github.rest.pulls.get({
               owner, repo, pull_number: context.payload.issue.number,
             })).data;
+            const sha = pr.head.sha;
             const shortSha = (s) => s.slice(0, 7);
             const target = process.env.TARGET_OVERRIDE || shortSha(pr.head.sha);
             const baseline = process.env.BASELINE_OVERRIDE || shortSha(pr.base.sha);
-            const xpuRepo = process.env.XPU_OPS_REPO;             // owner/name of the repo running the job
-            const xpuName = xpuRepo.split('/')[1];
-            const workflowUrl = `https://github.com/${xpuRepo}/actions/workflows/${process.env.XPU_OPS_WORKFLOW}`;
-            // Name carries the other repo so the check clearly runs in `xpuRepo`.
-            // Always create a fresh in-progress run (updating a completed run keeps
-            // its old conclusion), then demote older acceptance checks so only the
-            // latest stays active. `prefix` keeps the demote match stable.
-            const prefix = `${process.env.CHECK_PREFIX} / ${comp}`;
-            const name = `${prefix} @ ${xpuName}`;
-            const check = (await github.rest.checks.create({
-              owner, repo, name, head_sha: pr.head.sha,
-              status: 'in_progress', started_at: new Date().toISOString(),
-              details_url: workflowUrl,
-              output: {
-                title: `Dispatching acceptance comparison (${pattern}) in ${xpuRepo}`,
-                summary: `Preparing **${comp}** (${pattern}) target vs baseline acceptance run in [\`${xpuRepo}\`](${workflowUrl})…`,
-              },
-            })).data;
-            const all = (await github.rest.checks.listForRef({
-              owner, repo, ref: pr.head.sha, per_page: 100,
-            })).data.check_runs;
-            for (const c of all) {
-              if (c.id !== check.id && c.name.startsWith(prefix)) {
-                await github.rest.checks.update({
-                  owner, repo, check_run_id: c.id,
-                  status: 'completed', conclusion: 'neutral',
-                  output: { title: 'Superseded', summary: 'Superseded by the latest acceptance run.' },
-                });
-              }
-            }
-            core.setOutput('check_id', check.id);
-            core.setOutput('check_name', name);
-            core.setOutput('head_sha', shortSha(pr.head.sha));
+            const dispatchUrl = process.env.DISPATCH_RUN_URL;
+            const workflowUrl = `https://github.com/${process.env.XPU_OPS_REPO}/actions/workflows/${process.env.XPU_OPS_WORKFLOW}`;
+            // #1 this-repo dispatch (marked success at the end of this job).
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha, state: 'pending',
+              context: process.env.DISPATCH_CONTEXT, target_url: dispatchUrl,
+              description: `Dispatching ${comp} acceptance (${pattern})…`,
+            });
+            // #2 other-repo acceptance run (finalized cross-repo by that run).
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha, state: 'pending',
+              context: process.env.ACCEPT_CONTEXT, target_url: workflowUrl,
+              description: `Queued ${comp} acceptance (${pattern}) in ${process.env.XPU_OPS_REPO}`,
+            });
+            core.setOutput('head_sha', sha);
             core.setOutput('component', comp);
             core.setOutput('pattern', pattern);
             core.setOutput('target_version', target);
@@ -153,17 +138,18 @@ jobs:
           TXO: ${{ steps.cmd.outputs.torch_xpu_ops }}
           TARGET: ${{ steps.check.outputs.target_version }}
           BASELINE: ${{ steps.check.outputs.baseline_version }}
-          CALLBACK_CHECK_ID: ${{ steps.check.outputs.check_id }}
+          CALLBACK_SHA: ${{ steps.check.outputs.head_sha }}
         run: |
-          # Fire-and-forget: acceptance reports its result back via
-          # repository_dispatch (acceptance-result), finalized by onednn-test-pt-result.yml.
+          # Fire-and-forget: the acceptance run posts commit status #2 back to
+          # this repo (see ACCEPT_CONTEXT) when it finishes.
           echo "since=$(date -u -d '-1 minute' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           gh workflow run "${XPU_OPS_WORKFLOW}" \
             --repo "${XPU_OPS_REPO}" \
             --ref "${XPU_OPS_REF}" \
             -f caller="onednn-pr-${PR_NUMBER}" \
             -f callback_repo="${{ github.repository }}" \
-            -f callback_check_id="${CALLBACK_CHECK_ID}" \
+            -f callback_sha="${CALLBACK_SHA}" \
+            -f callback_context="${ACCEPT_CONTEXT}" \
             -f test_pattern="${PATTERN}" \
             -f python="${PYVER}" \
             -f pytorch="${PYTORCH}" \
@@ -192,25 +178,33 @@ jobs:
           done
           echo "run_url=${url}" >> "$GITHUB_OUTPUT"
 
-      - name: Link run in check
-        if: steps.cmd.outputs.run == 'true' && steps.locate.outputs.run_url != ''
+      - name: Finalize dispatch status
+        if: steps.cmd.outputs.run == 'true'
         env:
           RUN_URL: ${{ steps.locate.outputs.run_url }}
-          CHECK_ID: ${{ steps.check.outputs.check_id }}
+          HEAD_SHA: ${{ steps.check.outputs.head_sha }}
           COMPONENT: ${{ steps.check.outputs.component }}
           PATTERN: ${{ steps.check.outputs.pattern }}
+          DISPATCH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         uses: actions/github-script@v7
         with:
           script: |
-            const runUrl = process.env.RUN_URL;
+            const { owner, repo } = context.repo;
+            const sha = process.env.HEAD_SHA;
             const comp = process.env.COMPONENT, pattern = process.env.PATTERN;
-            await github.rest.checks.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              check_run_id: Number(process.env.CHECK_ID),
-              details_url: runUrl,
-              output: {
-                title: `Acceptance comparison running (${pattern})`,
-                summary: `**${comp}** (${pattern}) target vs baseline acceptance run is in progress.\n\n[View the dispatched run in ${process.env.XPU_OPS_REPO}](${runUrl})`,
-              },
+            const runUrl = process.env.RUN_URL;
+            // #1 dispatch done.
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha, state: 'success',
+              context: process.env.DISPATCH_CONTEXT,
+              target_url: process.env.DISPATCH_RUN_URL,
+              description: `Dispatched ${comp} acceptance (${pattern}).`,
             });
+            // #2 point at the actual run while it executes (stays pending).
+            if (runUrl) {
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha, state: 'pending',
+                context: process.env.ACCEPT_CONTEXT, target_url: runUrl,
+                description: `Running ${comp} acceptance (${pattern}) in ${process.env.XPU_OPS_REPO}`,
+              });
+            }
