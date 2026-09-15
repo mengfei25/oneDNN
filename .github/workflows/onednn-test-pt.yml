@@ -6,13 +6,14 @@ name: oneDNN test_pt
 # required merge gate).
 #
 # Command syntax (comment on the PR):
-#   test_pt[_ut|_e2e] [key=value ...]
-#     scope     : test_pt (UT+E2E) | test_pt_ut (UT only) | test_pt_e2e (E2E only)
+#   test_pt[_ut|_e2e|_smoke] [key=value ...]
+#     scope     : test_pt (UT+E2E) | test_pt_ut (UT only) | test_pt_e2e (E2E only) | test_pt_smoke (smoke only)
 #     overrides : python= pytorch= torch_xpu_ops= target= baseline=
 #   default to the PR head/base. Examples:
 #     test_pt
 #     test_pt_ut python=3.12
 #     test_pt_e2e target=<sha> baseline=<sha>
+#     test_pt_smoke
 
 on:
   issue_comment:
@@ -60,10 +61,10 @@ jobs:
         with:
           script: |
             const body = (process.env.COMMENT_BODY || '').trim();
-            // Syntax: test_pt[_ut|_e2e] [key=value ...]
-            const m = body.match(/^\/?(test_pt(?:_ut|_e2e)?)\b([\s\S]*)$/i);
+            // Syntax: test_pt[_ut|_e2e|_smoke] [key=value ...]
+            const m = body.match(/^\/?(test_pt(?:_ut|_e2e|_smoke)?)\b([\s\S]*)$/i);
             if (!m) { core.setOutput('run', 'false'); return; }
-            const pattern = m[1].toLowerCase(); // test_pt | test_pt_ut | test_pt_e2e
+            const pattern = m[1].toLowerCase(); // test_pt | test_pt_ut | test_pt_e2e | test_pt_smoke
             const opts = {
               python: '3.10',
               pytorch: 'main',
