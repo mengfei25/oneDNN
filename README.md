@@ -10,6 +10,7 @@ performance library of basic building blocks for deep learning applications.
 oneDNN project is part of the [UXL Foundation] and is an implementation
 of the [oneAPI specification] for oneDNN component.
 
+
 The library is optimized for Intel 64/AMD64 architecture based processors,
 Arm(R) 64-bit Architecture (AArch64)-based processors, and Intel Graphics.
 oneDNN has experimental support for the following architectures: NVIDIA\* GPU,
