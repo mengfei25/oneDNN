@@ -43,7 +43,7 @@ jobs:
   dispatch:
     name: dispatch acceptance
     if: >-
-      github.repository_owner == 'uxlfoundation' &&
+      github.repository_owner == 'mengfei25' &&
       github.event.issue.pull_request &&
       (github.event.comment.author_association == 'OWNER' ||
        github.event.comment.author_association == 'MEMBER' ||
